@@ -47,9 +47,9 @@ def run_bot():
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    # Bot-icha thread addaatiin kaasi
+    # Bot-icha background irratti kaasi
     threading.Thread(target=run_bot, daemon=True).start()
     
-    # Flask port Render irraa fudhata
+    # Render irratti 'PORT' 10000 ta'uu qaba
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
