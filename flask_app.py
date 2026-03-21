@@ -32,7 +32,8 @@ TOKEN = "8487920836:AAFe77nalADov0H7ufj4GWZb0gYiEq5xdBQ"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Hubachiisa: Linkii Koyeb siif kennu asirratti jijjiiri (Tarkaanfii itti aanu)
-    web_app_url = "https://qaro-bingo-erki112.koyeb.app" 
+    web_app_url = web_app_url = "https://qaro-bingo.onrender.com"
+
     
     keyboard = [[InlineKeyboardButton("🎮 TAPHAA JALQABI", web_app_info=WebAppInfo(url=web_app_url))]]
     reply_markup = InlineKeyboardMarkup(keyboard)
