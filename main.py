@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from threading import Thread
 import telebot
 from dotenv import load_dotenv
+import time
 
 # Load env
 load_dotenv()
@@ -14,15 +15,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://your-app.onrender.com")
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN required!")
+    raise ValueError("❌ BOT_TOKEN required!")
 
-# Setup
-app = Flask(__name__, template_folder='templates', static_folder='static')
-bot = telebot.TeleBot(BOT_TOKEN)
-logging.basicConfig(level=logging.INFO)
+# Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Game state
+# Flask app
+app = Flask(__name__, template_folder='templates', static_folder='static')
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Game state (thread-safe)
 games: Dict[str, Dict] = {}
 called_numbers: set = set()
 
@@ -59,22 +62,20 @@ class BingoGame:
             if "Anti Diagonal" not in self.wins: self.wins.append("Anti Diagonal")
         return bool(self.wins)
 
-# ========== TELEGRAM BOT ==========
+# ========== TELEGRAM BOT HANDLERS ==========
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(telebot.types.InlineKeyboardButton("🎮 Play Bingo", web_app=telebot.types.WebAppInfo(WEBAPP_URL)))
     bot.reply_to(message, 
-        "🎉 **Telegram Bingo Bot**\n\n"
-        "👆 WebApp furma\n\n"
-        "**Commands:**\n`/new` `/call` `/reset`",
+        "🎉 **Telegram Bingo Bot**\n\n👆 WebApp furma\n\n**/new /call /reset**",
         reply_markup=markup, parse_mode='Markdown')
 
 @bot.message_handler(commands=['new'])
 def new_game(message):
     user_id = str(message.from_user.id)
     games[user_id] = {"game": BingoGame(), "created": datetime.now().isoformat(), "wins": []}
-    bot.reply_to(message, "🎫 **Kaardii haaraa barame!**\nWebApp furadhu! 🎮", parse_mode='Markdown')
+    bot.reply_to(message, "🎫 **Kaardii haaraa barame!** 🎮", parse_mode='Markdown')
 
 @bot.message_handler(commands=['call'])
 def call_number(message):
@@ -87,10 +88,9 @@ def call_number(message):
 
 @bot.message_handler(commands=['reset'])
 def reset(message):
-    global called_numbers
     user_id = str(message.from_user.id)
     games.pop(user_id, None)
-    bot.reply_to(message, "🔄 **Game reset!** `/new` gamadhu", parse_mode='Markdown')
+    bot.reply_to(message, "🔄 **Reset!** `/new` gamadhu", parse_mode='Markdown')
 
 @bot.message_handler(commands=['status'])
 def status(message):
@@ -100,12 +100,7 @@ def status(message):
     status = f"📊 **Status**\n• Games: {total_games}\n• Called: {total_called}"
     bot.reply_to(message, status, parse_mode='Markdown')
 
-# Polling thread
-def run_bot():
-    logger.info("🤖 Starting Telegram Bot...")
-    bot.infinity_polling(none_stop=True)
-
-# ========== FLASK API ==========
+# ========== FLASK ROUTES ==========
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -117,6 +112,7 @@ def send_static(path):
 @app.route('/api/new/<user_id>', methods=['POST'])
 def api_new_game(user_id):
     games[user_id] = {"game": BingoGame(), "created": datetime.now().isoformat(), "wins": []}
+    logger.info(f"🎮 WebApp new game: {user_id}")
     return jsonify({'success': True})
 
 @app.route('/api/game/<user_id>')
@@ -135,21 +131,42 @@ def api_game(user_id):
 def api_mark(user_id):
     data = request.json
     number = data.get('number')
-    if user_id not in games: return jsonify({'error': 'No game'}), 404
+    if user_id not in games: 
+        return jsonify({'error': 'No game'}), 404
     game = games[user_id]['game']
     won = game.mark_number(number)
     return jsonify({'success': True, 'won': won, 'wins': game.wins})
 
+# ========== STARTUP ==========
+def run_bot():
+    """Bot polling thread"""
+    logger.info("🤖 Starting Telegram Bot polling...")
+    try:
+        bot.infinity_polling(none_stop=True, timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        time.sleep(5)
+        run_bot()  # Restart
+
 def run_flask():
+    """Flask server"""
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"🌐 Starting Flask on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
 
-if __name__ == "__main__":
-    # Start both in threads
+def main():
+    logger.info("🚀 Bingo Bot + Flask Starting...")
+    logger.info(f"🌐 WebApp: {WEBAPP_URL}")
+    
+    # Start threads
     flask_thread = Thread(target=run_flask, daemon=True)
     bot_thread = Thread(target=run_bot, daemon=True)
     
     flask_thread.start()
     bot_thread.start()
     
+    # Keep main thread alive
     flask_thread.join()
+
+if __name__ == "__main__":
+    main()
