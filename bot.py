@@ -2,7 +2,7 @@ import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = "8487920836:AAFe77nalADov0H7ufj4GWZb0gYiEq5xdBQ"
+TOKEN = "8487920836:AAEBYuO1MCJNRgmMaLk0k70xp6tqKglrnmM"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://qaro-bingo.onrender.com"
