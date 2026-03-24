@@ -1,9 +1,11 @@
-bind = "0.0.0.0:$PORT"
-workers = 1
+import os
+
+bind = "0.0.0.0:" + str(os.environ.get("PORT", 5000))
+workers = 4
 worker_class = "sync"
-timeout = 120
+worker_connections = 1000
+timeout = 30
 keepalive = 2
-preload_app = True
-loglevel = "info"
-accesslog = "-"
-errorlog = "-"
+max_requests = 1000
+max_requests_jitter = 100
+preload = False
