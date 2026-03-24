@@ -1,0 +1,9 @@
+bind = "0.0.0.0:$PORT"
+workers = 1
+worker_class = "sync"
+timeout = 120
+keepalive = 2
+preload_app = True
+loglevel = "info"
+accesslog = "-"
+errorlog = "-"
