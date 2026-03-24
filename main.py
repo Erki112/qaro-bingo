@@ -5,6 +5,8 @@ import random
 import logging
 import time
 import threading
+import signal
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, render_template, send_from_directory
@@ -32,7 +34,8 @@ app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
 rdb = redis.from_url(REDIS_URL, decode_responses=True)
 
-# Game state (stored in Redis for persistence)
+# Game state
+games: Dict[str, BingoGame] = {}
 BINGO_NUMBERS = list(range(1, 76))
 
 class BingoGame:
@@ -55,7 +58,7 @@ class BingoGame:
             row = []
             for j in range(5):
                 if i == 2 and j == 2:
-                    row.append(0)
+                    row.append(0)  # FREE
                 else:
                     row.append(numbers.pop())
             grid.append(row)
@@ -120,25 +123,22 @@ class BingoGame:
             return True
         return False
 
-# Global games dict (persisted to Redis)
-games: Dict[str, BingoGame] = {}
-
+# Global functions
 def load_games():
     global games
     try:
         all_games = rdb.hgetall('games')
         for game_id, data in all_games.items():
             games[game_id] = BingoGame.from_dict(json.loads(data))
-    except:
-        pass
+        logger.info(f"Loaded {len(games)} games from Redis")
+    except Exception as e:
+        logger.error(f"Error loading games: {e}")
 
 def save_game(game_id: str, game: BingoGame):
     rdb.hset('games', game_id, json.dumps(game.to_dict()))
-    # Auto cleanup old games
-    rdb.expire('games', 7200)  # 2 hours
+    rdb.expire('games', 7200)  # 2 hours TTL
 
 def notify_game_update(game_id: str, message: str):
-    """Notify all players in game"""
     game = games.get(game_id)
     if not game:
         return
@@ -156,7 +156,36 @@ def notify_game_update(game_id: str, message: str):
         except:
             pass
 
-# === TELEGRAM BOT ===
+def cleanup_old_games():
+    while True:
+        try:
+            current_time = time.time()
+            to_delete = []
+            for game_id, game in list(games.items()):
+                if (current_time - datetime.fromisoformat(game.start_time).timestamp()) > 7200:
+                    to_delete.append(game_id)
+            
+            for game_id in to_delete:
+                del games[game_id]
+                rdb.hdel('games', game_id)
+                logger.info(f"Cleaned up old game: {game_id}")
+        except:
+            pass
+        time.sleep(300)  # 5 minutes
+
+# Signal handler for graceful shutdown
+def signal_handler(sig, frame):
+    logger.info("Shutting down gracefully...")
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# === TELEGRAM BOT HANDLERS ===
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     markup = types.InlineKeyboardMarkup()
@@ -166,9 +195,9 @@ def start_handler(message):
     bot.send_message(
         message.chat.id,
         "🎉 <b>Telegram Bingo Bot</b>\n\n"
-        "👇 Click to play 5x5 Bingo with friends!\n"
-        "📱 Use WebApp to create/join games\n"
-        "🔢 Use /call 42 to call numbers",
+        "👇 Click to play 5x5 Bingo!\n"
+        "📱 Create/join games in WebApp\n"
+        "🔢 /call 42 - Call numbers",
         parse_mode='HTML',
         reply_markup=markup
     )
@@ -191,28 +220,25 @@ def call_handler(message):
                         notify_game_update(game_id, f"✅ Number <b>{number}</b> called!")
                         save_game(game_id, game)
                 else:
-                    bot.reply_to(message, "❌ No active game or game not found")
+                    bot.reply_to(message, "❌ No active game")
             else:
-                bot.reply_to(message, "❌ Join a game first in WebApp")
+                bot.reply_to(message, "❌ Join game first (WebApp)")
         else:
-            bot.reply_to(message, "❌ Number must be 1-75")
+            bot.reply_to(message, "❌ Number 1-75 only")
     except:
-        bot.reply_to(message, "❌ Usage: <code>/call 42</code>", parse_mode='HTML')
+        bot.reply_to(message, "❌ <code>/call 42</code>", parse_mode='HTML')
 
 @bot.message_handler(commands=['mygame'])
 def mygame_handler(message):
     user_game = rdb.get(f"user_game:{message.from_user.id}")
-    if user_game:
-        game = games.get(user_game)
-        if game:
-            status = f"Status: {game.status.upper()}\nPlayers: {len(game.players)}\nCalled: {len(game.called_numbers)}"
-            bot.reply_to(message, f"🎰 Game <code>{user_game}</code>\n{status}", parse_mode='HTML')
-        else:
-            bot.reply_to(message, f"❌ Game <code>{user_game}</code> not found")
+    if user_game and user_game in games:
+        game = games[user_game]
+        status = f"Status: {game.status.upper()}\nPlayers: {len(game.players)}\nCalled: {len(game.called_numbers)}"
+        bot.reply_to(message, f"🎰 Game <code>{user_game}</code>\n{status}", parse_mode='HTML')
     else:
-        bot.reply_to(message, "❌ No active game. Use WebApp to join!")
+        bot.reply_to(message, "❌ No active game. Use WebApp!")
 
-# === FLASK API ===
+# === FLASK ROUTES ===
 @app.route('/')
 @app.route('/webapp')
 def index():
@@ -245,14 +271,13 @@ def get_game(game_id: str):
     if not game:
         return jsonify({'error': 'Game not found'}), 404
     
-    save_game(game_id, game)  # Update access time
+    save_game(game_id, game)
     return jsonify({
         'game_id': game.game_id,
         'players': len(game.players),
         'status': game.status,
         'called_numbers': game.called_numbers,
-        'winner': game.winner,
-        'host_grid': game.host_grid
+        'winner': game.winner
     })
 
 @app.route('/api/game/<game_id>/join', methods=['POST'])
@@ -269,22 +294,14 @@ def join_game(game_id: str):
         return jsonify({'error': 'Already joined'})
     
     player_grid = game._generate_grid()
-    game.players.append({
-        'user_id': user_id,
-        'username': username,
-        'grid': player_grid
-    })
+    game.players.append({'user_id': user_id, 'username': username, 'grid': player_grid})
     
     save_game(game_id, game)
     rdb.setex(f"user_game:{user_id}", 7200, game_id)
     
     notify_game_update(game_id, f"{username} joined! ({len(game.players)} players)")
     
-    return jsonify({
-        'success': True,
-        'grid': player_grid,
-        'players': len(game.players)
-    })
+    return jsonify({'success': True, 'grid': player_grid, 'players': len(game.players)})
 
 @app.route('/api/game/<game_id>/call/<int:number>', methods=['POST'])
 def call_number(game_id: str, number: int):
@@ -325,38 +342,28 @@ def webhook():
         return 'OK'
     return 'OK', 200
 
-# === STARTUP ===
-def cleanup_old_games():
-    """Periodic cleanup"""
-    while True:
-        try:
-            current_time = time.time()
-            to_delete = []
-            for game_id, game in games.items():
-                if (current_time - datetime.fromisoformat(game.start_time).timestamp()) > 7200:
-                    to_delete.append(game_id)
-            
-            for game_id in to_delete:
-                del games[game_id]
-                rdb.hdel('games', game_id)
-                logger.info(f"Cleaned up old game: {game_id}")
-        except:
-            pass
-        time.sleep(300)  # 5 minutes
-
+# === MAIN ===
 if __name__ == '__main__':
-    # Load existing games
-    load_games()
+    # Production vs Development
+    port = int(os.environ.get('PORT', 5000))
     
-    # Start cleanup thread
-    cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
-    cleanup_thread.start()
-    
-    # Set webhook
-    webhook_url = f"{WEBAPP_URL}/webhook"
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_url)
-    logger.info(f"✅ Webhook set: {webhook_url}")
-    
-    # Start Flask
-    app.run(host=HOST, port=PORT, debug=False)
+    if port == 5000:  # Local development
+        load_games()
+        cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
+        cleanup_thread.start()
+        
+        webhook_url = f"{WEBAPP_URL}/webhook"
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Local dev - Webhook: {webhook_url}")
+        
+        app.run(host='0.0.0.0', port=5000, debug=False)
+    else:  # Production (Gunicorn/Render)
+        logger.info("✅ Production mode - Gunicorn will start Flask")
+        load_games()
+        cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
+        cleanup_thread.start()
+        webhook_url = f"{WEBAPP_URL}/webhook"
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Production - Webhook: {webhook_url}")
