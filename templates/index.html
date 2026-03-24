@@ -1,57 +1,48 @@
 <!DOCTYPE html>
-<html lang="om">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Qaro Bingo</title>
+    <title>🎰 Bingo Royale</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        body { font-family: sans-serif; text-align: center; background: #f4f4f4; }
-        .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; max-width: 350px; margin: 20px auto; }
-        .cell { width: 60px; height: 60px; background: white; border: 2px solid #333; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 20px; cursor: pointer; }
-        .cell.marked { background: #ffcc00; color: white; border-color: #e6b800; }
-        .cell.free { background: #888; color: white; }
-        button { padding: 10px 20px; font-size: 18px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; }
-    </style>
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <h1>Qaro Bingo 🎮</h1>
-    <div id="bingo-card" class="grid"></div>
-    <br>
-    <button onclick="fetchCard()">Kaardii Haaraa</button>
+    <div class="container">
+        <header>
+            <h1>🎰 Bingo Royale</h1>
+            <div class="game-info">
+                <span id="gameStatus">Create Game</span>
+                <span id="playerCount">0 players</span>
+            </div>
+        </header>
 
-    <script>
-        let tg = window.Telegram.WebApp;
-        tg.expand();
+        <div class="game-section">
+            <div class="game-code-section" id="gameCodeSection">
+                <input type="text" id="gameCode" placeholder="Enter Game ID" maxlength="36">
+                <button id="joinBtn">Join Game</button>
+                <button id="createBtn">Create Game</button>
+            </div>
 
-        async function fetchCard() {
-            const userId = tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : "test_user";
-            const response = await fetch(`/get_card/${userId}`);
-            const data = await response.json();
-            renderCard(data.card);
-        }
+            <div class="bingo-grid" id="bingoGrid" style="display:none;">
+                <div class="grid-header">
+                    <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
+                </div>
+                <div class="grid-cells" id="gridCells"></div>
+            </div>
 
-        function renderCard(card) {
-            const container = document.getElementById('bingo-card');
-            container.innerHTML = '';
-            for (let r = 0; r < 5; r++) {
-                for (let c = 0; c < 5; c++) {
-                    const val = card[c][r];
-                    const cell = document.createElement('div');
-                    cell.className = 'cell';
-                    if (val === 0) {
-                        cell.innerText = 'FREE';
-                        cell.classList.add('free');
-                    } else {
-                        cell.innerText = val;
-                        cell.onclick = () => cell.classList.toggle('marked');
-                    }
-                    container.appendChild(cell);
-                }
-            }
-        }
-        fetchCard();
-    </script>
+            <div class="controls" id="controls" style="display:none;">
+                <button id="newRoundBtn">New Round</button>
+                <button id="callBtn">Call Number</button>
+                <input type="number" id="callNumber" min="1" max="75" placeholder="1-75">
+            </div>
+
+            <div class="called-numbers" id="calledNumbers" style="display:none;">
+                <h3>📢 Called Numbers</h3>
+                <div id="numbersList"></div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/script.js"></script>
 </body>
 </html>
-
