@@ -1,70 +1,40 @@
+<!-- templates/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎰 Bingo Royale Ethiopia</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <link rel="stylesheet" href="/static/style.css">
+    <title>Bingo Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
     <div class="container">
-        <!-- BALANCE SECTION -->
-        <div class="balance-card">
-            <div class="balance-header">
-                <h2>💰 Balansingiz</h2>
-                <span id="balanceAmount" class="balance">0 ETB</span>
+        <h1>Bingo Bot</h1>
+        
+        <div id="game-container" class="hidden">
+            <div id="card" class="card">
+                <!-- Bingo card will be generated here -->
             </div>
-            <div class="balance-actions">
-                <button id="depositBtn" class="btn-primary">📈 To'ldirish</button>
-                <button id="withdrawBtn" class="btn-secondary">💸 Yechib olish</button>
+            
+            <div id="controls">
+                <button id="call-btn">Call Next Number</button>
+                <button id="new-game-btn">New Game</button>
             </div>
-        </div>
-
-        <!-- TABS -->
-        <div class="tabs">
-            <button class="tab-btn active" onclick="showTab('bingo')">🎮 Bingo</button>
-            <button class="tab-btn" onclick="showTab('history')">📋 Tarix</button>
-        </div>
-
-        <!-- BINGO TAB -->
-        <div id="bingoTab" class="tab-content active">
-            <div class="game-code-section">
-                <input type="text" id="gameCode" placeholder="O'yin ID kiriting">
-                <button id="joinBtn">Qo'shilish</button>
-                <button id="createBtn">Yaratish (10 ETB)</button>
-            </div>
-            <div class="bingo-grid" id="bingoGrid" style="display:none;">
-                <div class="grid-header">B I N G O</div>
-                <div class="grid-cells" id="gridCells"></div>
-            </div>
-            <div class="controls" id="controls" style="display:none;">
-                <button id="newRoundBtn">Yangi Raund</button>
-                <input type="number" id="callNumber" placeholder="Raqam (1-75)">
-                <button id="callBtn">Chaqirish</button>
+            
+            <div id="game-info">
+                <p>Called Numbers: <span id="called-numbers">None</span></p>
+                <p id="status"></p>
             </div>
         </div>
-
-        <!-- HISTORY TAB -->
-        <div id="historyTab" class="tab-content">
-            <div class="history-list" id="historyList">
-                <p>Transaktsiya tarixi bo'sh</p>
-            </div>
-        </div>
-
-        <!-- WITHDRAW MODAL -->
-        <div id="withdrawModal" class="modal">
-            <div class="modal-content">
-                <h3>💸 Yechib olish</h3>
-                <input type="number" id="withdrawAmount" placeholder="Miqdor (min 50 ETB)" min="50">
-                <div class="modal-buttons">
-                    <button id="confirmWithdraw" class="btn-primary">So'rash</button>
-                    <button id="cancelWithdraw" class="btn-secondary">Bekor</button>
-                </div>
-            </div>
+        
+        <div id="start-screen">
+            <h2>Ready to Play Bingo?</h2>
+            <p>Enter your player ID:</p>
+            <input type="text" id="player-id" placeholder="Player ID" value="player1">
+            <button id="start-btn">Start Game</button>
         </div>
     </div>
 
-    <script src="/static/script.js"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
