@@ -7,12 +7,11 @@ import time
 import threading
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, render_template, send_from_directory
 import telebot
 from telebot import types
-import redis
 from dotenv import load_dotenv
 
 # Load environment
@@ -21,7 +20,6 @@ load_dotenv()
 # Config
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 WEBAPP_URL = os.getenv('WEBAPP_URL', 'https://your-domain.com')
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 PORT = int(os.getenv('PORT', 5000))
 HOST = os.getenv('HOST', '0.0.0.0')
 
@@ -32,23 +30,24 @@ logger = logging.getLogger(__name__)
 # Initialize
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
-rdb = redis.from_url(REDIS_URL, decode_responses=True)
 
-# Game state
-games: Dict[str, BingoGame] = {}
+# === IN-MEMORY STORAGE (DICTIONARY) ===
+games: Dict[str, 'BingoGame'] = {}
+user_games: Dict[int, str] = {}  # user_id -> game_id
+game_cleanup_time = 7200  # 2 hours TTL
+
 BINGO_NUMBERS = list(range(1, 76))
 
 class BingoGame:
     def __init__(self, host_id: int):
         self.host_id = host_id
-        self.game_id = str(uuid.uuid4())
+        self.game_id = str(uuid.uuid4())[:8]  # Short ID
         self.players: List[Dict] = []
-        self.grid: List[List[int]] = self._generate_grid()
-        self.host_grid = self.grid.copy()
+        self.host_grid = self._generate_grid()
         self.called_numbers: List[int] = []
-        self.status = "waiting"
+        self.status = "waiting"  # waiting, active, finished
         self.winner = None
-        self.start_time = datetime.now().isoformat()
+        self.created_at = datetime.now()
     
     def _generate_grid(self) -> List[List[int]]:
         numbers = BINGO_NUMBERS.copy()
@@ -73,20 +72,8 @@ class BingoGame:
             'called_numbers': self.called_numbers,
             'status': self.status,
             'winner': self.winner,
-            'start_time': self.start_time
+            'created_at': self.created_at.isoformat()
         }
-    
-    @classmethod
-    def from_dict(cls, data):
-        game = cls(data['host_id'])
-        game.game_id = data['game_id']
-        game.players = data['players']
-        game.host_grid = data['host_grid']
-        game.called_numbers = data['called_numbers']
-        game.status = data['status']
-        game.winner = data['winner']
-        game.start_time = data['start_time']
-        return game
     
     def mark_number(self, number: int) -> bool:
         if number in self.called_numbers:
@@ -108,82 +95,81 @@ class BingoGame:
         return False
     
     def _check_bingo(self, grid: List[List[int]]) -> bool:
-        # Rows
-        for row in grid:
-            if all(cell == 0 or cell in self.called_numbers for cell in row):
+        # Rows, Columns, Diagonals check
+        for i in range(5):
+            # Rows
+            if all(grid[i][j] == 0 or grid[i][j] in self.called_numbers for j in range(5)):
                 return True
-        # Columns
-        for col in range(5):
-            if all(grid[row][col] == 0 or grid[row][col] in self.called_numbers for row in range(5)):
+            # Columns
+            if all(grid[j][i] == 0 or grid[j][i] in self.called_numbers for j in range(5)):
                 return True
+        
         # Diagonals
         if all(grid[i][i] == 0 or grid[i][i] in self.called_numbers for i in range(5)):
             return True
         if all(grid[i][4-i] == 0 or grid[i][4-i] in self.called_numbers for i in range(5)):
             return True
         return False
+    
+    def is_expired(self) -> bool:
+        return (datetime.now() - self.created_at).total_seconds() > game_cleanup_time
 
-# Global functions
-def load_games():
-    global games
-    try:
-        all_games = rdb.hgetall('games')
-        for game_id, data in all_games.items():
-            games[game_id] = BingoGame.from_dict(json.loads(data))
-        logger.info(f"Loaded {len(games)} games from Redis")
-    except Exception as e:
-        logger.error(f"Error loading games: {e}")
-
-def save_game(game_id: str, game: BingoGame):
-    rdb.hset('games', game_id, json.dumps(game.to_dict()))
-    rdb.expire('games', 7200)  # 2 hours TTL
-
+# === UTILITY FUNCTIONS ===
 def notify_game_update(game_id: str, message: str):
-    game = games.get(game_id)
-    if not game:
+    """Notify all players via Telegram"""
+    if game_id not in games:
         return
+    
+    game = games[game_id]
     
     # Notify host
     try:
-        bot.send_message(game.host_id, f"🎰 <b>{message}</b>\nGame: <code>{game_id}</code>", parse_mode='HTML')
+        bot.send_message(
+            game.host_id, 
+            f"🎰 <b>{message}</b>\n\nGame ID: <code>{game_id}</code>", 
+            parse_mode='HTML'
+        )
     except:
         pass
     
     # Notify players
     for player in game.players:
         try:
-            bot.send_message(player['user_id'], f"🎰 <b>{message}</b>\nGame: <code>{game_id}</code>", parse_mode='HTML')
+            bot.send_message(
+                player['user_id'], 
+                f"🎰 <b>{message}</b>\n\nGame ID: <code>{game_id}</code>", 
+                parse_mode='HTML'
+            )
         except:
             pass
 
 def cleanup_old_games():
+    """Remove expired games every 5 minutes"""
     while True:
         try:
-            current_time = time.time()
-            to_delete = []
-            for game_id, game in list(games.items()):
-                if (current_time - datetime.fromisoformat(game.start_time).timestamp()) > 7200:
-                    to_delete.append(game_id)
+            current_time = datetime.now()
+            expired_games = []
             
-            for game_id in to_delete:
+            # Find expired games
+            for game_id, game in list(games.items()):
+                if game.is_expired():
+                    expired_games.append(game_id)
+            
+            # Cleanup
+            for game_id in expired_games:
                 del games[game_id]
-                rdb.hdel('games', game_id)
-                logger.info(f"Cleaned up old game: {game_id}")
-        except:
-            pass
-        time.sleep(300)  # 5 minutes
-
-# Signal handler for graceful shutdown
-def signal_handler(sig, frame):
-    logger.info("Shutting down gracefully...")
-    try:
-        bot.remove_webhook()
-    except:
-        pass
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+                # Remove user references
+                if game.host_id in user_games and user_games[game.host_id] == game_id:
+                    del user_games[game.host_id]
+                for player in games.get(game_id, BingoGame(0)).players:
+                    if player['user_id'] in user_games and user_games[player['user_id']] == game_id:
+                        del user_games[player['user_id']]
+                logger.info(f"🧹 Cleaned expired game: {game_id}")
+            
+            time.sleep(300)  # 5 minutes
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+            time.sleep(60)
 
 # === TELEGRAM BOT HANDLERS ===
 @bot.message_handler(commands=['start'])
@@ -195,9 +181,10 @@ def start_handler(message):
     bot.send_message(
         message.chat.id,
         "🎉 <b>Telegram Bingo Bot</b>\n\n"
-        "👇 Click to play 5x5 Bingo!\n"
-        "📱 Create/join games in WebApp\n"
-        "🔢 /call 42 - Call numbers",
+        "👇 5x5 Bingo o'ynash uchun bosing!\n"
+        "📱 WebApp da o'yin yarating\n"
+        "🔢 /call 42 - Raqam chaqiring\n"
+        "ℹ️ /mygame - O'yiningiz holati",
         parse_mode='HTML',
         reply_markup=markup
     )
@@ -206,39 +193,66 @@ def start_handler(message):
 def call_handler(message):
     try:
         parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "❌ <code>/call 42</code> (1-75)", parse_mode='HTML')
+            return
+        
         number = int(parts[1])
-        if 1 <= number <= 75:
-            user_game = rdb.get(f"user_game:{message.from_user.id}")
-            if user_game:
-                game_id = user_game
-                game = games.get(game_id)
-                if game and game.status == "active":
-                    if game.mark_number(number):
-                        notify_game_update(game_id, f"🎉 BINGO! Winner: {game.winner}")
-                        save_game(game_id, game)
-                    else:
-                        notify_game_update(game_id, f"✅ Number <b>{number}</b> called!")
-                        save_game(game_id, game)
-                else:
-                    bot.reply_to(message, "❌ No active game")
-            else:
-                bot.reply_to(message, "❌ Join game first (WebApp)")
+        if not (1 <= number <= 75):
+            bot.reply_to(message, "❌ Raqam 1-75 oralig'ida bo'lishi kerak!")
+            return
+        
+        user_id = message.from_user.id
+        if user_id not in user_games:
+            bot.reply_to(message, "❌ Avval WebApp orqali o'yin qo'shiling!")
+            return
+        
+        game_id = user_games[user_id]
+        if game_id not in games:
+            del user_games[user_id]
+            bot.reply_to(message, "❌ O'yin topilmadi!")
+            return
+        
+        game = games[game_id]
+        if game.status != "active":
+            bot.reply_to(message, "❌ O'yin faol emas! Yangi raund boshlang.")
+            return
+        
+        if game.mark_number(number):
+            notify_game_update(game_id, f"🎉 <b>BINGO!</b>\nG'olib: {game.winner}")
         else:
-            bot.reply_to(message, "❌ Number 1-75 only")
-    except:
-        bot.reply_to(message, "❌ <code>/call 42</code>", parse_mode='HTML')
+            notify_game_update(game_id, f"✅ Raqam <b>{number}</b> chaqirildi!")
+        
+        bot.reply_to(message, f"✅ {number} raqam chaqirildi!")
+        
+    except ValueError:
+        bot.reply_to(message, "❌ Noto'g'ri raqam!")
+    except Exception as e:
+        logger.error(f"Call error: {e}")
+        bot.reply_to(message, "❌ Xatolik yuz berdi!")
 
 @bot.message_handler(commands=['mygame'])
 def mygame_handler(message):
-    user_game = rdb.get(f"user_game:{message.from_user.id}")
-    if user_game and user_game in games:
-        game = games[user_game]
-        status = f"Status: {game.status.upper()}\nPlayers: {len(game.players)}\nCalled: {len(game.called_numbers)}"
-        bot.reply_to(message, f"🎰 Game <code>{user_game}</code>\n{status}", parse_mode='HTML')
-    else:
-        bot.reply_to(message, "❌ No active game. Use WebApp!")
+    user_id = message.from_user.id
+    if user_id not in user_games:
+        bot.reply_to(message, "❌ Sizda faol o'yin yo'q. WebApp orqali qo'shiling!")
+        return
+    
+    game_id = user_games[user_id]
+    if game_id not in games:
+        del user_games[user_id]
+        bot.reply_to(message, "❌ O'yin topilmadi!")
+        return
+    
+    game = games[game_id]
+    status = f"Status: {game.status.upper()}\nO'yinchilar: {len(game.players) + 1}\nChaqirilgan: {len(game.called_numbers)}"
+    text = f"🎰 O'yin <code>{game_id}</code>\n\n{status}"
+    if game.winner:
+        text += f"\n🏆 G'olib: {game.winner}"
+    
+    bot.reply_to(message, text, parse_mode='HTML')
 
-# === FLASK ROUTES ===
+# === FLASK API ROUTES ===
 @app.route('/')
 @app.route('/webapp')
 def index():
@@ -255,9 +269,9 @@ def create_game():
     
     game = BingoGame(host_id=user_id)
     games[game.game_id] = game
-    save_game(game.game_id, game)
-    rdb.setex(f"user_game:{user_id}", 7200, game.game_id)
+    user_games[user_id] = game.game_id
     
+    logger.info(f"New game created: {game.game_id} by user {user_id}")
     return jsonify({
         'game_id': game.game_id,
         'grid': game.host_grid,
@@ -267,11 +281,17 @@ def create_game():
 
 @app.route('/api/game/<game_id>')
 def get_game(game_id: str):
-    game = games.get(game_id)
-    if not game:
+    if game_id not in games:
         return jsonify({'error': 'Game not found'}), 404
     
-    save_game(game_id, game)
+    game = games[game_id]
+    if game.is_expired():
+        del games[game_id]
+        for uid, gid in list(user_games.items()):
+            if gid == game_id:
+                del user_games[uid]
+        return jsonify({'error': 'Game expired'}), 404
+    
     return jsonify({
         'game_id': game.game_id,
         'players': len(game.players),
@@ -286,53 +306,69 @@ def join_game(game_id: str):
     user_id = data.get('user_id', 0)
     username = data.get('username', f'User{user_id}')
     
-    game = games.get(game_id)
-    if not game:
+    if game_id not in games:
         return jsonify({'error': 'Game not found'}), 404
+    
+    game = games[game_id]
+    if game.is_expired():
+        del games[game_id]
+        return jsonify({'error': 'Game expired'}), 404
     
     if any(p['user_id'] == user_id for p in game.players):
         return jsonify({'error': 'Already joined'})
     
     player_grid = game._generate_grid()
-    game.players.append({'user_id': user_id, 'username': username, 'grid': player_grid})
+    game.players.append({
+        'user_id': user_id,
+        'username': username,
+        'grid': player_grid
+    })
     
-    save_game(game_id, game)
-    rdb.setex(f"user_game:{user_id}", 7200, game_id)
+    user_games[user_id] = game_id
+    notify_game_update(game_id, f"{username} qo'shildi! ({len(game.players)} o'yinchi)")
     
-    notify_game_update(game_id, f"{username} joined! ({len(game.players)} players)")
-    
-    return jsonify({'success': True, 'grid': player_grid, 'players': len(game.players)})
+    logger.info(f"Player {user_id} joined game {game_id}")
+    return jsonify({
+        'success': True,
+        'grid': player_grid,
+        'players': len(game.players)
+    })
 
 @app.route('/api/game/<game_id>/call/<int:number>', methods=['POST'])
 def call_number(game_id: str, number: int):
-    game = games.get(game_id)
-    if not game or game.status != "active":
+    if game_id not in games or not (1 <= number <= 75):
+        return jsonify({'error': 'Invalid game or number'}), 400
+    
+    game = games[game_id]
+    if game.is_expired():
+        del games[game_id]
+        return jsonify({'error': 'Game expired'}), 404
+    
+    if game.status != "active":
         return jsonify({'error': 'Game not active'}), 400
     
     if game.mark_number(number):
-        notify_game_update(game_id, f"🎉 BINGO! Winner: {game.winner}!")
-        save_game(game_id, game)
+        notify_game_update(game_id, f"🎉 <b>BINGO!</b>\nG'olib: {game.winner}")
         return jsonify({'bingo': True, 'winner': game.winner})
     
-    notify_game_update(game_id, f"Number {number} called!")
-    save_game(game_id, game)
+    notify_game_update(game_id, f"Raqam <b>{number}</b> chaqirildi!")
     return jsonify({'success': True, 'bingo': False})
 
 @app.route('/api/game/<game_id>/newround', methods=['POST'])
 def new_round(game_id: str):
-    game = games.get(game_id)
-    if not game:
+    if game_id not in games:
         return jsonify({'error': 'Game not found'}), 404
     
+    game = games[game_id]
     game.status = "active"
     game.called_numbers = []
     game.winner = None
-    save_game(game_id, game)
+    game.created_at = datetime.now()  # Reset timer
     
-    notify_game_update(game_id, "🔄 New round started!")
+    notify_game_update(game_id, "🔄 Yangi raund boshlandi!")
     return jsonify({'success': True})
 
-# === WEBHOOK ===
+# === TELEGRAM WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
@@ -342,28 +378,35 @@ def webhook():
         return 'OK'
     return 'OK', 200
 
-# === MAIN ===
+# === SIGNAL HANDLER & STARTUP ===
+def signal_handler(sig, frame):
+    logger.info("Shutting down gracefully...")
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 if __name__ == '__main__':
+    # Start cleanup thread
+    cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
+    cleanup_thread.start()
+    
     # Production vs Development
     port = int(os.environ.get('PORT', 5000))
+    webhook_url = f"{WEBAPP_URL}/webhook"
     
-    if port == 5000:  # Local development
-        load_games()
-        cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
-        cleanup_thread.start()
-        
-        webhook_url = f"{WEBAPP_URL}/webhook"
+    try:
         bot.remove_webhook()
         bot.set_webhook(url=webhook_url)
-        logger.info(f"✅ Local dev - Webhook: {webhook_url}")
-        
+        logger.info(f"✅ Webhook set: {webhook_url}")
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+    
+    if port == 5000:  # Local dev
         app.run(host='0.0.0.0', port=5000, debug=False)
-    else:  # Production (Gunicorn/Render)
-        logger.info("✅ Production mode - Gunicorn will start Flask")
-        load_games()
-        cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
-        cleanup_thread.start()
-        webhook_url = f"{WEBAPP_URL}/webhook"
-        bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"✅ Production - Webhook: {webhook_url}")
+    else:  # Production
+        logger.info("✅ Production ready - Gunicorn will start")
