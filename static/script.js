@@ -1,115 +1,105 @@
-const tg = window.Telegram.WebApp;
-tg.expand();
-
-let currentGame = null;
-let myGrid = [];
-let userId = tg.initDataUnsafe?.user?.id || Date.now();
-let gameInterval;
-
-tg.MainButton.setText('🎮 Play Bingo').show().onClick(() => {
-    document.getElementById('gameCodeSection').style.display = 'block';
-    tg.MainButton.hide();
-});
-
-document.getElementById('createBtn').onclick = createGame;
-document.getElementById('joinBtn').onclick = joinGame;
-document.getElementById('newRoundBtn').onclick = newRound;
-document.getElementById('callBtn').onclick = callNumber;
-
-async function createGame() {
-    try {
-        const res = await fetch('/api/game/create', {
+// static/script.js
+document.addEventListener('DOMContentLoaded', function() {
+    const startScreen = document.getElementById('start-screen');
+    const gameContainer = document.getElementById('game-container');
+    const startBtn = document.getElementById('start-btn');
+    const callBtn = document.getElementById('call-btn');
+    const newGameBtn = document.getElementById('new-game-btn');
+    const playerIdInput = document.getElementById('player-id');
+    const cardElement = document.getElementById('card');
+    const calledNumbersElement = document.getElementById('called-numbers');
+    const statusElement = document.getElementById('status');
+    
+    let playerId = '';
+    let currentCard = [];
+    let calledNumbers = [];
+    
+    startBtn.addEventListener('click', startGame);
+    callBtn.addEventListener('click', callNumber);
+    newGameBtn.addEventListener('click', newGame);
+    
+    function startGame() {
+        playerId = playerIdInput.value.trim() || 'player1';
+        fetch('/start_game', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({user_id: userId})
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({player_id: playerId})
+        })
+        .then(response => response.json())
+        .then(data => {
+            currentCard = data.card;
+            calledNumbers = [];
+            updateCardDisplay();
+            startScreen.classList.add('hidden');
+            gameContainer.classList.remove('hidden');
+            updateGameInfo();
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error starting game');
         });
-        const data = await res.json();
-        if (data.game_id) {
-            currentGame = data;
-            showGame(data.game_id, data.grid);
-            document.getElementById('gameStatus').textContent = `Game ID: ${data.game_id}`;
-            tg.MainButton.setText('Game Created!').show();
-        }
-    } catch(e) { alert('Error creating game'); }
-}
-
-async function joinGame() {
-    const gameId = document.getElementById('gameCode').value.trim();
-    if (!gameId) return alert('Enter Game ID');
+    }
     
-    try {
-        const res = await fetch(`/api/game/${gameId}/join`, {
+    function callNumber() {
+        fetch('/call_number', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                user_id: userId,
-                username: tg.initDataUnsafe?.user?.first_name || 'Player'
-            })
-        });
-        const data = await res.json();
-        if (data.success) {
-            currentGame = {game_id: gameId};
-            showGame(gameId, data.grid);
-            startGamePolling(gameId);
-        }
-    } catch(e) { alert('Game not found'); }
-}
-
-function showGame(gameId, grid) {
-    currentGame.game_id = gameId;
-    myGrid = grid;
-    document.getElementById('gameCodeSection').style.display = 'none';
-    document.getElementById('bingoGrid').style.display = 'block';
-    document.getElementById('controls').style.display = 'flex';
-    document.getElementById('calledNumbers').style.display = 'block';
-    
-    const cells = document.getElementById('gridCells');
-    cells.innerHTML = '';
-    grid.forEach(row => {
-        row.forEach(num => {
-            const cell = document.createElement('div');
-            cell.className = 'cell';
-            cell.dataset.number = num;
-            cell.textContent = num === 0 ? 'FREE' : num;
-            if (num === 0) cell.classList.add('free');
-            cells.appendChild(cell);
-        });
-    });
-}
-
-async function newRound() {
-    if (!currentGame?.game_id) return;
-    await fetch(`/api/game/${currentGame.game_id}/newround`, {method: 'POST'});
-    location.reload();
-}
-
-async function callNumber() {
-    const num = parseInt(document.getElementById('callNumber').value);
-    if (!currentGame?.game_id || num < 1 || num > 75) return;
-    
-    const res = await fetch(`/api/game/${currentGame.game_id}/call/${num}`, {method: 'POST'});
-    const data = await res.json();
-    if (data.bingo) alert(`🎉 BINGO! Winner: ${data.winner}`);
-}
-
-function startGamePolling(gameId) {
-    clearInterval(gameInterval);
-    gameInterval = setInterval(async () => {
-        try {
-            const res = await fetch(`/api/game/${gameId}`);
-            const data = await res.json();
-            if (data.called_numbers) {
-                data.called_numbers.forEach(n => markNumber(n));
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({player_id: playerId})
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert(data.error);
+                return;
             }
-            document.getElementById('playerCount').textContent = `${data.players} players`;
-        } catch(e) {}
-    }, 2000);
-}
-
-function markNumber(num) {
-    document.querySelectorAll('.cell').forEach(cell => {
-        if (parseInt(cell.dataset.number) === num) {
-            cell.classList.add('called');
-        }
-    });
+            
+            calledNumbers.push(data.number);
+            updateGameInfo();
+            updateCardDisplay();
+            
+            if (data.winner) {
+                statusElement.textContent = 'BINGO! You win!';
+                callBtn.disabled = true;
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error calling number');
+        });
+    }
+    
+    function newGame() {
+        startGame();
+    }
+    
+    function updateCardDisplay() {
+        cardElement.innerHTML = '';
+        currentCard.forEach((row, rowIndex) => {
+            row.forEach((cell, colIndex) => {
+                const cellElement = document.createElement('div');
+                cellElement.className = 'card-cell';
+                cellElement.textContent = cell;
+                
+                if (cell === 0) {
+                    cellElement.classList.add('free');
+                    cellElement.textContent = 'FREE';
+                } else if (calledNumbers.includes(cell)) {
+                    cellElement.classList.add('highlighted');
                 }
+                
+                cardElement.appendChild(cellElement);
+            });
+        });
+    }
+    
+    function updateGameInfo() {
+        calledNumbersElement.textContent = calledNumbers.join(', ') || 'None';
+        if (calledNumbers.length > 0) {
+            statusElement.textContent = '';
+        }
+    }
+});
