@@ -3,15 +3,15 @@ import uuid
 import json
 import random
 import logging
+import time
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, render_template, send_from_directory
-from flask_socketio import SocketIO, emit, join_room, leave_room
 import telebot
 from telebot import types
 import redis
 from dotenv import load_dotenv
-import threading
 
 # Load environment
 load_dotenv()
@@ -29,13 +29,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)
 bot = telebot.TeleBot(BOT_TOKEN)
-rdb = redis.from_url(REDIS_URL)
+rdb = redis.from_url(REDIS_URL, decode_responses=True)
 
-# Game state
-games: Dict[str, Dict] = {}
+# Game state (stored in Redis for persistence)
 BINGO_NUMBERS = list(range(1, 76))
 
 class BingoGame:
@@ -44,10 +41,11 @@ class BingoGame:
         self.game_id = str(uuid.uuid4())
         self.players: List[Dict] = []
         self.grid: List[List[int]] = self._generate_grid()
+        self.host_grid = self.grid.copy()
         self.called_numbers: List[int] = []
-        self.status = "waiting"  # waiting, active, finished
+        self.status = "waiting"
         self.winner = None
-        self.start_time = datetime.now()
+        self.start_time = datetime.now().isoformat()
     
     def _generate_grid(self) -> List[List[int]]:
         numbers = BINGO_NUMBERS.copy()
@@ -57,18 +55,48 @@ class BingoGame:
             row = []
             for j in range(5):
                 if i == 2 and j == 2:
-                    row.append(0)  # FREE
+                    row.append(0)
                 else:
                     row.append(numbers.pop())
             grid.append(row)
         return grid
+    
+    def to_dict(self):
+        return {
+            'host_id': self.host_id,
+            'game_id': self.game_id,
+            'players': self.players,
+            'host_grid': self.host_grid,
+            'called_numbers': self.called_numbers,
+            'status': self.status,
+            'winner': self.winner,
+            'start_time': self.start_time
+        }
+    
+    @classmethod
+    def from_dict(cls, data):
+        game = cls(data['host_id'])
+        game.game_id = data['game_id']
+        game.players = data['players']
+        game.host_grid = data['host_grid']
+        game.called_numbers = data['called_numbers']
+        game.status = data['status']
+        game.winner = data['winner']
+        game.start_time = data['start_time']
+        return game
     
     def mark_number(self, number: int) -> bool:
         if number in self.called_numbers:
             return False
         self.called_numbers.append(number)
         
-        # Check winners
+        # Check host bingo
+        if self._check_bingo(self.host_grid):
+            self.winner = self.host_id
+            self.status = "finished"
+            return True
+        
+        # Check players
         for player in self.players:
             if self._check_bingo(player['grid']):
                 self.winner = player['user_id']
@@ -92,7 +120,43 @@ class BingoGame:
             return True
         return False
 
-# === TELEGRAM BOT HANDLERS ===
+# Global games dict (persisted to Redis)
+games: Dict[str, BingoGame] = {}
+
+def load_games():
+    global games
+    try:
+        all_games = rdb.hgetall('games')
+        for game_id, data in all_games.items():
+            games[game_id] = BingoGame.from_dict(json.loads(data))
+    except:
+        pass
+
+def save_game(game_id: str, game: BingoGame):
+    rdb.hset('games', game_id, json.dumps(game.to_dict()))
+    # Auto cleanup old games
+    rdb.expire('games', 7200)  # 2 hours
+
+def notify_game_update(game_id: str, message: str):
+    """Notify all players in game"""
+    game = games.get(game_id)
+    if not game:
+        return
+    
+    # Notify host
+    try:
+        bot.send_message(game.host_id, f"🎰 <b>{message}</b>\nGame: <code>{game_id}</code>", parse_mode='HTML')
+    except:
+        pass
+    
+    # Notify players
+    for player in game.players:
+        try:
+            bot.send_message(player['user_id'], f"🎰 <b>{message}</b>\nGame: <code>{game_id}</code>", parse_mode='HTML')
+        except:
+            pass
+
+# === TELEGRAM BOT ===
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     markup = types.InlineKeyboardMarkup()
@@ -101,68 +165,57 @@ def start_handler(message):
     
     bot.send_message(
         message.chat.id,
-        "🎉 <b>Welcome to Telegram Bingo Bot!</b>\n\n"
-        "Click below to play with your 5x5 bingo card! 👇",
+        "🎉 <b>Telegram Bingo Bot</b>\n\n"
+        "👇 Click to play 5x5 Bingo with friends!\n"
+        "📱 Use WebApp to create/join games\n"
+        "🔢 Use /call 42 to call numbers",
         parse_mode='HTML',
         reply_markup=markup
     )
 
-@bot.message_handler(commands=['help'])
-def help_handler(message):
-    help_text = """
-🎰 <b>Bingo Commands:</b>
-/start - Start playing
-/call 42 - Call number (admin)
-/help - Show this help
-
-Create a game in WebApp and share the Game ID!
-    """
-    bot.reply_to(message, help_text, parse_mode='HTML')
-
 @bot.message_handler(commands=['call'])
-def call_number_cmd(message):
+def call_handler(message):
     try:
         parts = message.text.split()
-        if len(parts) != 2:
-            bot.reply_to(message, "Usage: /call 42")
-            return
-        
         number = int(parts[1])
         if 1 <= number <= 75:
             user_game = rdb.get(f"user_game:{message.from_user.id}")
             if user_game:
-                game_id = user_game.decode()
+                game_id = user_game
                 game = games.get(game_id)
                 if game and game.status == "active":
                     if game.mark_number(number):
-                        bot.reply_to(message, f"🎉 <b>BINGO!</b>\nWinner: ID {game.winner}")
-                        socketio.emit('game_won', {
-                            'winner': game.winner,
-                            'number': number
-                        }, room=f"game_{game_id}")
+                        notify_game_update(game_id, f"🎉 BINGO! Winner: {game.winner}")
+                        save_game(game_id, game)
                     else:
-                        bot.reply_to(message, f"✅ <b>{number}</b> called!")
-                        socketio.emit('number_called', {'number': number}, room=f"game_{game_id}")
+                        notify_game_update(game_id, f"✅ Number <b>{number}</b> called!")
+                        save_game(game_id, game)
                 else:
-                    bot.reply_to(message, "❌ No active game found")
+                    bot.reply_to(message, "❌ No active game or game not found")
             else:
-                bot.reply_to(message, "❌ Join a game first!")
+                bot.reply_to(message, "❌ Join a game first in WebApp")
         else:
             bot.reply_to(message, "❌ Number must be 1-75")
-    except ValueError:
-        bot.reply_to(message, "❌ Invalid number!")
+    except:
+        bot.reply_to(message, "❌ Usage: <code>/call 42</code>", parse_mode='HTML')
 
-@bot.message_handler(func=lambda m: True)
-def echo_all(message):
-    bot.reply_to(message, "Use /start to play or /help for commands!")
+@bot.message_handler(commands=['mygame'])
+def mygame_handler(message):
+    user_game = rdb.get(f"user_game:{message.from_user.id}")
+    if user_game:
+        game = games.get(user_game)
+        if game:
+            status = f"Status: {game.status.upper()}\nPlayers: {len(game.players)}\nCalled: {len(game.called_numbers)}"
+            bot.reply_to(message, f"🎰 Game <code>{user_game}</code>\n{status}", parse_mode='HTML')
+        else:
+            bot.reply_to(message, f"❌ Game <code>{user_game}</code> not found")
+    else:
+        bot.reply_to(message, "❌ No active game. Use WebApp to join!")
 
-# === FLASK ROUTES ===
+# === FLASK API ===
 @app.route('/')
-def index():
-    return render_template('index.html')
-
 @app.route('/webapp')
-def webapp():
+def index():
     return render_template('index.html')
 
 @app.route('/static/<path:filename>')
@@ -176,13 +229,14 @@ def create_game():
     
     game = BingoGame(host_id=user_id)
     games[game.game_id] = game
-    rdb.setex(f"user_game:{user_id}", 3600, game.game_id)
+    save_game(game.game_id, game)
+    rdb.setex(f"user_game:{user_id}", 7200, game.game_id)
     
     return jsonify({
         'game_id': game.game_id,
-        'grid': game.grid,
+        'grid': game.host_grid,
         'status': game.status,
-        'host': True
+        'players': 1
     })
 
 @app.route('/api/game/<game_id>')
@@ -190,12 +244,15 @@ def get_game(game_id: str):
     game = games.get(game_id)
     if not game:
         return jsonify({'error': 'Game not found'}), 404
+    
+    save_game(game_id, game)  # Update access time
     return jsonify({
         'game_id': game.game_id,
         'players': len(game.players),
         'status': game.status,
         'called_numbers': game.called_numbers,
-        'winner': game.winner
+        'winner': game.winner,
+        'host_grid': game.host_grid
     })
 
 @app.route('/api/game/<game_id>/join', methods=['POST'])
@@ -218,12 +275,10 @@ def join_game(game_id: str):
         'grid': player_grid
     })
     
-    rdb.setex(f"user_game:{user_id}", 3600, game_id)
+    save_game(game_id, game)
+    rdb.setex(f"user_game:{user_id}", 7200, game_id)
     
-    socketio.emit('player_joined', {
-        'username': username,
-        'total_players': len(game.players)
-    }, room=f"game_{game_id}")
+    notify_game_update(game_id, f"{username} joined! ({len(game.players)} players)")
     
     return jsonify({
         'success': True,
@@ -232,75 +287,76 @@ def join_game(game_id: str):
     })
 
 @app.route('/api/game/<game_id>/call/<int:number>', methods=['POST'])
-def call_number_api(game_id: str, number: int):
+def call_number(game_id: str, number: int):
     game = games.get(game_id)
     if not game or game.status != "active":
         return jsonify({'error': 'Game not active'}), 400
     
     if game.mark_number(number):
-        socketio.emit('game_won', {
-            'winner': game.winner,
-            'number': number
-        }, room=f"game_{game_id}")
+        notify_game_update(game_id, f"🎉 BINGO! Winner: {game.winner}!")
+        save_game(game_id, game)
         return jsonify({'bingo': True, 'winner': game.winner})
     
-    socketio.emit('number_called', {'number': number}, room=f"game_{game_id}")
+    notify_game_update(game_id, f"Number {number} called!")
+    save_game(game_id, game)
     return jsonify({'success': True, 'bingo': False})
 
-# === SOCKET.IO EVENTS ===
-@socketio.on('join_game')
-def on_join(data):
-    game_id = data.get('game_id')
-    if game_id:
-        join_room(f"game_{game_id}")
-        game = games.get(game_id)
-        if game:
-            emit('game_state', {
-                'status': game.status,
-                'called_numbers': game.called_numbers,
-                'players': len(game.players),
-                'winner': game.winner
-            })
-
-@socketio.on('leave_game')
-def on_leave(data):
-    game_id = data.get('game_id')
-    if game_id:
-        leave_room(f"game_{game_id}")
-
-# === MAIN ===
-def run_bot():
-    """Run bot with webhook"""
-    webhook_url = f"{WEBAPP_URL}/webhook"
+@app.route('/api/game/<game_id>/newround', methods=['POST'])
+def new_round(game_id: str):
+    game = games.get(game_id)
+    if not game:
+        return jsonify({'error': 'Game not found'}), 404
     
-    # Delete any existing webhook and set new one
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_url)
-    logger.info(f"Webhook set to {webhook_url}")
+    game.status = "active"
+    game.called_numbers = []
+    game.winner = None
+    save_game(game_id, game)
     
-    # Start polling as backup (webhook primary)
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=1, timeout=30)
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            time.sleep(5)
+    notify_game_update(game_id, "🔄 New round started!")
+    return jsonify({'success': True})
 
+# === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Telegram Webhook endpoint"""
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
-        return ''
-    else:
-        return 'OK', 200
+        return 'OK'
+    return 'OK', 200
+
+# === STARTUP ===
+def cleanup_old_games():
+    """Periodic cleanup"""
+    while True:
+        try:
+            current_time = time.time()
+            to_delete = []
+            for game_id, game in games.items():
+                if (current_time - datetime.fromisoformat(game.start_time).timestamp()) > 7200:
+                    to_delete.append(game_id)
+            
+            for game_id in to_delete:
+                del games[game_id]
+                rdb.hdel('games', game_id)
+                logger.info(f"Cleaned up old game: {game_id}")
+        except:
+            pass
+        time.sleep(300)  # 5 minutes
 
 if __name__ == '__main__':
-    # Start bot in thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # Load existing games
+    load_games()
     
-    # Start Flask + SocketIO
-    socketio.run(app, host=HOST, port=PORT, debug=False)
+    # Start cleanup thread
+    cleanup_thread = threading.Thread(target=cleanup_old_games, daemon=True)
+    cleanup_thread.start()
+    
+    # Set webhook
+    webhook_url = f"{WEBAPP_URL}/webhook"
+    bot.remove_webhook()
+    bot.set_webhook(url=webhook_url)
+    logger.info(f"✅ Webhook set: {webhook_url}")
+    
+    # Start Flask
+    app.run(host=HOST, port=PORT, debug=False)
