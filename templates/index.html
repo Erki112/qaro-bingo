@@ -3,46 +3,44 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎰 Bingo Royale</title>
+    <title>🎰 Bingo Royale Ethiopia</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>🎰 Bingo Royale</h1>
-            <div class="game-info">
-                <span id="gameStatus">Create Game</span>
-                <span id="playerCount">0 players</span>
+        <!-- BALANCE HEADER -->
+        <div class="balance-header">
+            <div class="balance-info">
+                <span>💰 Balans</span>
+                <span id="balanceAmount">0.00</span> <small>ETB</small>
             </div>
-        </header>
-
-        <div class="game-section">
-            <div class="game-code-section" id="gameCodeSection">
-                <input type="text" id="gameCode" placeholder="Enter Game ID" maxlength="36">
-                <button id="joinBtn">Join Game</button>
-                <button id="createBtn">Create Game</button>
-            </div>
-
-            <div class="bingo-grid" id="bingoGrid" style="display:none;">
-                <div class="grid-header">
-                    <span>B</span><span>I</span><span>N</span><span>G</span><span>O</span>
-                </div>
-                <div class="grid-cells" id="gridCells"></div>
-            </div>
-
-            <div class="controls" id="controls" style="display:none;">
-                <button id="newRoundBtn">New Round</button>
-                <button id="callBtn">Call Number</button>
-                <input type="number" id="callNumber" min="1" max="75" placeholder="1-75">
-            </div>
-
-            <div class="called-numbers" id="calledNumbers" style="display:none;">
-                <h3>📢 Called Numbers</h3>
-                <div id="numbersList"></div>
-            </div>
+            <button id="withdrawBtn" class="withdraw-btn">💸 Withdraw</button>
         </div>
-    </div>
-    <script src="/static/script.js"></script>
-</body>
-</html>
+
+        <!-- TABS -->
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="bingo">🎮 Bingo</button>
+            <button class="tab-btn" data-tab="wallet">💳 Wallet</button>
+        </div>
+
+        <!-- BINGO TAB -->
+        <div id="bingoTab" class="tab-content active">
+            <div class="game-section">
+                <div class="entry-fee">
+                    <div class="fee-info">
+                        <span>🎟️ Kirish to'lovi: 10 ETB</span>
+                        <span>🏆 Yutish: 100 ETB</span>
+                    </div>
+                    <button id="playBtn" class="play-btn">🎮 O'ynash</button>
+                </div>
+
+                <div class="game-code-section" id="gameCodeSection" style="display:none;">
+                    <input type="text" id="gameCode" placeholder="O'yin ID kiriting">
+                    <button id="joinBtn">Qo'shilish</button>
+                    <button id="createBtn">Yaratish</button>
+                </div>
+
+                <div class="bingo-grid" id="bingoGrid" style="display:none;">
+                    <div class="grid-header">B I N G O</div>
+                    <div class="grid
